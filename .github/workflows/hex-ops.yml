@@ -1,0 +1,130 @@
+name: Hex ops
+
+# Manual-only (workflow_dispatch) -- this never runs on push. Each per-package
+# repo (taskweft/nif, oauth-mcp-bridge, mcp-client, rebac, ...) keeps its own
+# publish.yml for that package's *own* tag-triggered releases; this workflow
+# is for operations that don't belong to any one package repo -- retiring a
+# package that no longer has a source repo at all (taskweft_mcp, taskweft_plans
+# were folded into taskweft/taskweft and archived), or publishing/retiring on
+# demand without needing repo-specific CI wiring.
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "What to do"
+        required: true
+        type: choice
+        options: [publish, retire, unretire]
+      package:
+        description: "Hex package name (e.g. taskweft_mcp). Required for retire/unretire; ignored for publish (read from the checked-out repo's mix.exs)."
+        required: false
+        type: string
+      version:
+        description: "Package version (e.g. 0.3.0-dev.2). Required for retire/unretire; ignored for publish."
+        required: false
+        type: string
+      repository:
+        description: "publish only -- owner/repo to check out and publish from, e.g. taskweft/nif."
+        required: false
+        type: string
+      ref:
+        description: "publish only -- branch, tag, or SHA to check out."
+        required: false
+        type: string
+        default: main
+      reason:
+        description: "retire only -- Hex retirement reason."
+        required: false
+        type: choice
+        options: [deprecated, invalid, security, renamed, other]
+        default: deprecated
+      message:
+        description: "retire only -- shown to anyone who resolves this version."
+        required: false
+        type: string
+
+jobs:
+  publish:
+    if: ${{ github.event.inputs.operation == 'publish' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs
+        run: |
+          if [ -z "${{ inputs.repository }}" ]; then
+            echo "::error::repository input is required for operation=publish"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: 27
+          elixir-version: "1.17"
+
+      - name: Get dependencies
+        run: mix deps.get
+
+      - name: Publish to Hex
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: mix hex.publish --yes
+
+  retire:
+    if: ${{ github.event.inputs.operation == 'retire' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs
+        run: |
+          if [ -z "${{ inputs.package }}" ] || [ -z "${{ inputs.version }}" ]; then
+            echo "::error::package and version inputs are required for operation=retire"
+            exit 1
+          fi
+
+      # No mix.exs checked out -- hex.retire/hex.unretire/hex.publish are
+      # plain archive tasks (from `mix local.hex`) that operate on hex.pm's
+      # registry directly by package name, not on the current project.
+      # Nothing to check out for retire/unretire.
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: 27
+          elixir-version: "1.17"
+
+      - run: mix local.hex --force
+
+      - name: Retire ${{ inputs.package }} ${{ inputs.version }}
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+          MESSAGE: ${{ inputs.message }}
+        run: |
+          if [ -n "$MESSAGE" ]; then
+            mix hex.retire "${{ inputs.package }}" "${{ inputs.version }}" "${{ inputs.reason }}" --message "$MESSAGE"
+          else
+            mix hex.retire "${{ inputs.package }}" "${{ inputs.version }}" "${{ inputs.reason }}"
+          fi
+
+  unretire:
+    if: ${{ github.event.inputs.operation == 'unretire' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs
+        run: |
+          if [ -z "${{ inputs.package }}" ] || [ -z "${{ inputs.version }}" ]; then
+            echo "::error::package and version inputs are required for operation=unretire"
+            exit 1
+          fi
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: 27
+          elixir-version: "1.17"
+
+      - run: mix local.hex --force
+
+      - name: Unretire ${{ inputs.package }} ${{ inputs.version }}
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: mix hex.unretire "${{ inputs.package }}" "${{ inputs.version }}"
